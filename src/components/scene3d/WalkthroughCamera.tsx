@@ -15,7 +15,6 @@ export default function WalkthroughCamera({ isLocked, startPosition }: Props) {
   const floorPlan = useFloorPlanStore(s => s.floorPlan)
 
   const euler = useRef(new THREE.Euler(0, 0, 0, 'YXZ'))
-  const velocity = useRef(new THREE.Vector3())
   const keys = useRef<Record<string, boolean>>({})
   const aabbs = useRef(buildWallAABBs(floorPlan))
 
@@ -66,34 +65,28 @@ export default function WalkthroughCamera({ isLocked, startPosition }: Props) {
     const k = keys.current
     const dir = new THREE.Vector3()
 
-    if (k['KeyW'] || k['ArrowUp']) dir.z -= 1
-    if (k['KeyS'] || k['ArrowDown']) dir.z += 1
-    if (k['KeyA'] || k['ArrowLeft']) dir.x -= 1
+    if (k['KeyW'] || k['ArrowUp'])    dir.z -= 1
+    if (k['KeyS'] || k['ArrowDown'])  dir.z += 1
+    if (k['KeyA'] || k['ArrowLeft'])  dir.x -= 1
     if (k['KeyD'] || k['ArrowRight']) dir.x += 1
 
     if (dir.length() > 0) {
       dir.normalize()
-      // Apply only yaw rotation (not pitch) for horizontal movement
+      // Rotate movement direction by camera yaw only (stay horizontal)
       dir.applyEuler(new THREE.Euler(0, euler.current.y, 0))
       dir.y = 0
-      velocity.current.addScaledVector(dir, WALK_SPEED * delta)
+
+      // Direct frame-rate-independent movement (no velocity accumulation)
+      const step = WALK_SPEED * delta
+      const nextX = camera.position.x + dir.x * step
+      const nextZ = camera.position.z + dir.z * step
+
+      const resolved = resolveCollisions({ x: nextX, z: nextZ }, aabbs.current, COLLISION_RADIUS)
+      camera.position.x = resolved.x
+      camera.position.z = resolved.z
     }
 
-    // Friction
-    velocity.current.multiplyScalar(0.82)
-
-    // Compute new position
-    const nextX = camera.position.x + velocity.current.x
-    const nextZ = camera.position.z + velocity.current.z
-
-    // Collision resolution
-    const resolved = resolveCollisions({ x: nextX, z: nextZ }, aabbs.current, COLLISION_RADIUS)
-
-    camera.position.x = resolved.x
-    camera.position.z = resolved.z
     camera.position.y = EYE_HEIGHT
-
-    // Apply camera rotation
     camera.quaternion.setFromEuler(euler.current)
   })
 

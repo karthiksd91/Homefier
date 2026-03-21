@@ -1,13 +1,14 @@
 import { useRef, useState, useEffect, useCallback } from 'react'
-import { Stage, Layer, Line, Circle, Text, Rect, Group, Image as KonvaImage } from 'react-konva'
+import { Stage, Layer, Line, Circle, Text, Arc, Group, Image as KonvaImage } from 'react-konva'
 import useImage from 'use-image'
 import type Konva from 'konva'
 import type { KonvaEventObject } from 'konva/lib/Node'
 import { useFloorPlanStore } from '@/store/useFloorPlanStore'
 import { useUIStore } from '@/store/useUIStore'
-import { detectRooms } from '@/lib/geometry/roomDetector'
+import { detectRooms, computeRoomArea } from '@/lib/geometry/roomDetector'
+import { OPENINGS_BY_ID } from '@/lib/catalog/openingsCatalog'
 import { DEFAULT_WALL_THICKNESS, DEFAULT_WALL_HEIGHT, SNAP_THRESHOLD } from '@/lib/constants'
-import type { Point2D } from '@/types'
+import type { Point2D, WallOpening } from '@/types'
 
 const GRID_SIZE = 50 // canvas pixels per grid cell
 
@@ -24,8 +25,10 @@ export default function FloorPlanCanvas() {
 
   // Drawing state
   const [drawStart, setDrawStart] = useState<{ nodeId: string; pos: Point2D } | null>(null)
+  const [openingStart, setOpeningStart] = useState<{ nodeId: string; pos: Point2D } | null>(null)
   const [cursorPos, setCursorPos] = useState<Point2D | null>(null)
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null)
+  const [hoveredRoomId, setHoveredRoomId] = useState<string | null>(null)
 
   const store = useFloorPlanStore()
   const ui = useUIStore()
@@ -48,13 +51,29 @@ export default function FloorPlanCanvas() {
   // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement) return
-      if (e.key === 'w' || e.key === 'W') ui.setActiveTool('wall')
-      if (e.key === 's' || e.key === 'S') ui.setActiveTool('select')
-      if (e.key === 'd' || e.key === 'D') ui.setActiveTool('door')
-      if (e.key === 'x' || e.key === 'X') ui.setActiveTool('window')
-      if (e.key === 'e' || e.key === 'E') ui.setActiveTool('eraser')
-      if (e.key === 'Escape') { setDrawStart(null); ui.setActiveTool('select') }
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return
+
+      // Mode switching: 1-4
+      if (e.key === '1') ui.setEditorMode('walls')
+      if (e.key === '2') ui.setEditorMode('openings')
+      if (e.key === '3') ui.setEditorMode('materials')
+      if (e.key === '4') ui.setEditorMode('furniture')
+
+      // Wall-mode sub-tools
+      if (ui.editorMode === 'walls') {
+        if (e.key === 'w' || e.key === 'W') ui.setActiveTool('wall')
+        if (e.key === 's' || e.key === 'S') ui.setActiveTool('select')
+        if (e.key === 'e' || e.key === 'E') ui.setActiveTool('eraser')
+      }
+
+      if (e.key === 'Escape') {
+        setDrawStart(null)
+        setOpeningStart(null)
+        ui.setSelectedWall(null)
+        ui.setSelectedRoom(null)
+        ui.setSelectedOpening(null)
+        if (ui.editorMode === 'walls') ui.setActiveTool('select')
+      }
       if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
         if (e.shiftKey) store.redo(); else store.undo()
       }
@@ -62,6 +81,11 @@ export default function FloorPlanCanvas() {
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [ui, store])
+
+  // Clear opening placement when mode changes
+  useEffect(() => {
+    setOpeningStart(null)
+  }, [ui.editorMode])
 
   // Re-detect rooms when walls change
   useEffect(() => {
@@ -76,19 +100,16 @@ export default function FloorPlanCanvas() {
     const stage = stageRef.current
     if (!stage) return { x: 0, y: 0 }
     const pt = stage.getPointerPosition() ?? { x: 0, y: 0 }
-    // Transform from stage coords to logical coords
     const x = (pt.x - stagePos.x) / scale
     const y = (pt.y - stagePos.y) / scale
     return { x, y }
   }, [scale, stagePos])
 
   function snapPoint(pos: Point2D, excludeId?: string): { pos: Point2D; nodeId: string | null } {
-    // Try snap to existing node
     const snappedNodeId = store.snapToExistingNode(pos, SNAP_THRESHOLD / scale, excludeId)
     if (snappedNodeId) {
       return { pos: store.floorPlan.nodes[snappedNodeId].position, nodeId: snappedNodeId }
     }
-    // Snap to grid
     return {
       pos: { x: snapToGrid(pos.x, GRID_SIZE), y: snapToGrid(pos.y, GRID_SIZE) },
       nodeId: null,
@@ -99,53 +120,77 @@ export default function FloorPlanCanvas() {
     const raw = getPointerPos(e)
     const { pos } = snapPoint(raw)
     setCursorPos(pos)
-
-    // Check hover node
     const nearNodeId = store.snapToExistingNode(raw, SNAP_THRESHOLD / scale)
     setHoveredNodeId(nearNodeId)
   }, [getPointerPos, scale, store])
 
+  // --- Mode-aware click handler ---
   const handleClick = useCallback((e: KonvaEventObject<MouseEvent>) => {
-    if (e.target !== stageRef.current && ui.activeTool === 'wall') {
-      // Clicked on a shape — only continue if it's a wall node being used as endpoint
-    }
     const raw = getPointerPos(e)
 
-    if (ui.activeTool === 'wall') {
-      const { pos, nodeId } = snapPoint(raw)
-
-      if (!drawStart) {
-        // Start a new wall
-        const id = nodeId ?? store.addNode(pos)
-        store.saveHistory()
-        setDrawStart({ nodeId: id, pos })
-      } else {
-        // End the wall
-        if (nodeId === drawStart.nodeId) {
-          // Clicked same node - cancel
-          setDrawStart(null)
-          return
+    if (ui.editorMode === 'walls') {
+      if (ui.activeTool === 'wall') {
+        const { pos, nodeId } = snapPoint(raw)
+        if (!drawStart) {
+          const id = nodeId ?? store.addNode(pos)
+          store.saveHistory()
+          setDrawStart({ nodeId: id, pos })
+        } else {
+          if (nodeId === drawStart.nodeId) {
+            setDrawStart(null)
+            return
+          }
+          const endId = nodeId ?? store.addNode(pos)
+          store.addWall(drawStart.nodeId, endId)
+          store.saveHistory()
+          setDrawStart({ nodeId: endId, pos: nodeId ? floorPlan.nodes[endId].position : pos })
         }
-        const endId = nodeId ?? store.addNode(pos)
-        store.addWall(drawStart.nodeId, endId)
-        store.saveHistory()
-
-        // Chain: start next wall from the endpoint
-        setDrawStart({ nodeId: endId, pos: nodeId ? floorPlan.nodes[endId].position : pos })
+      } else if (ui.activeTool === 'select') {
+        ui.setSelectedRoom(null)
+        ui.setSelectedWall(null)
+      } else if (ui.activeTool === 'eraser') {
+        setDrawStart(null)
       }
-    } else if (ui.activeTool === 'select') {
+    } else if (ui.editorMode === 'openings') {
+      // Node-to-node opening placement (click empty space to create new nodes)
+      if (ui.selectedOpeningCatalogId) {
+        const { pos, nodeId } = snapPoint(raw)
+        if (!openingStart) {
+          const id = nodeId ?? store.addNode(pos)
+          store.saveHistory()
+          setOpeningStart({ nodeId: id, pos: nodeId ? floorPlan.nodes[id].position : pos })
+        } else {
+          if (nodeId === openingStart.nodeId) {
+            setOpeningStart(null)
+            return
+          }
+          const endId = nodeId ?? store.addNode(pos)
+          const catalogItem = OPENINGS_BY_ID[ui.selectedOpeningCatalogId]
+          if (catalogItem) {
+            const wallId = store.addWall(openingStart.nodeId, endId)
+            store.addOpening(wallId, {
+              type: catalogItem.type,
+              offsetAlongWall: 0.5,
+              width: catalogItem.width,
+              height: catalogItem.height,
+              bottomOffset: catalogItem.bottomOffset,
+            })
+            store.saveHistory()
+          }
+          setOpeningStart(null)
+        }
+      }
+    } else if (ui.editorMode === 'materials') {
+      // Click on empty area deselects
       ui.setSelectedRoom(null)
-      ui.setSelectedWall(null)
-    } else if (ui.activeTool === 'eraser') {
-      setDrawStart(null)
     }
-  }, [ui, drawStart, getPointerPos, scale, store, floorPlan.nodes])
+  }, [ui, drawStart, openingStart, getPointerPos, scale, store, floorPlan.nodes])
 
   const handleDblClick = useCallback(() => {
-    if (ui.activeTool === 'wall') {
+    if (ui.editorMode === 'walls' && ui.activeTool === 'wall') {
       setDrawStart(null)
     }
-  }, [ui.activeTool])
+  }, [ui.editorMode, ui.activeTool])
 
   // Zoom on scroll
   const handleWheel = useCallback((e: KonvaEventObject<WheelEvent>) => {
@@ -167,12 +212,81 @@ export default function FloorPlanCanvas() {
     })
   }, [scale, stagePos])
 
+  // --- Wall click handler ---
+  function handleWallClick(wallId: string) {
+    if (ui.editorMode === 'walls') {
+      if (ui.activeTool === 'select') {
+        ui.setSelectedWall(wallId)
+        ui.setSelectedRoom(null)
+      } else if (ui.activeTool === 'eraser') {
+        store.deleteWall(wallId)
+        store.saveHistory()
+      }
+    } else if (ui.editorMode === 'openings') {
+      // Add the selected opening type to this wall
+      const catalogId = ui.selectedOpeningCatalogId
+      if (catalogId) {
+        const catalogItem = OPENINGS_BY_ID[catalogId]
+        if (catalogItem) {
+          store.addOpening(wallId, {
+            type: catalogItem.type,
+            offsetAlongWall: 0.5,
+            width: catalogItem.width,
+            height: catalogItem.height,
+            bottomOffset: catalogItem.bottomOffset,
+          })
+          store.saveHistory()
+        }
+      }
+    }
+  }
+
+  // --- Room click handler ---
+  function handleRoomClick(roomId: string) {
+    if (ui.editorMode === 'walls') {
+      ui.setSelectedRoom(roomId)
+      ui.setSelectedWall(null)
+    } else if (ui.editorMode === 'materials') {
+      // Apply selected material to this room
+      const matId = ui.selectedMaterialId
+      if (matId) {
+        const target = ui.materialTarget
+        if (target === 'floor') store.updateRoom(roomId, { floorMaterialId: matId })
+        else if (target === 'wall') store.updateRoom(roomId, { wallMaterialId: matId })
+        else store.updateRoom(roomId, { ceilingMaterialId: matId })
+      }
+      ui.setSelectedRoom(roomId)
+    } else if (ui.editorMode === 'openings') {
+      // No room interaction in openings mode
+    }
+  }
+
+  // --- Opening click handler ---
+  function handleOpeningClick(wallId: string, openingId: string) {
+    if (ui.editorMode === 'openings') {
+      ui.setSelectedWall(wallId)
+      ui.setSelectedOpening(openingId)
+    } else if (ui.editorMode === 'walls' && ui.activeTool === 'eraser') {
+      store.removeOpening(wallId, openingId)
+      store.saveHistory()
+    }
+  }
+
   const walls = Object.values(floorPlan.walls)
   const nodes = Object.values(floorPlan.nodes)
   const rooms = Object.values(floorPlan.rooms)
 
+  const isDraggable = ui.editorMode === 'walls' && ui.activeTool === 'select'
+  const cursorStyle = (ui.editorMode === 'walls' && ui.activeTool === 'wall')
+    ? 'crosshair'
+    : (ui.editorMode === 'walls' && ui.activeTool === 'eraser')
+      ? 'pointer'
+      : (ui.editorMode === 'openings' && ui.selectedOpeningCatalogId)
+        ? 'crosshair'
+        : 'default'
+
   return (
-    <div ref={containerRef} className="absolute inset-0 cursor-crosshair">
+    <div ref={containerRef} className="absolute inset-0" style={{ cursor: cursorStyle }}>
       <Stage
         ref={stageRef}
         width={size.width}
@@ -181,7 +295,7 @@ export default function FloorPlanCanvas() {
         y={stagePos.y}
         scaleX={scale}
         scaleY={scale}
-        draggable={ui.activeTool === 'select'}
+        draggable={isDraggable}
         onDragEnd={e => setStagePos({ x: e.target.x(), y: e.target.y() })}
         onMouseMove={handleMouseMove}
         onClick={handleClick}
@@ -225,136 +339,288 @@ export default function FloorPlanCanvas() {
           </Layer>
         )}
 
-        {/* Room fills */}
-        <Layer listening={false}>
+        {/* Room fills — clickable in walls & materials modes */}
+        <Layer listening={ui.editorMode === 'walls' || ui.editorMode === 'materials'}>
           {rooms.map(room => {
             const pts = room.nodeIds.flatMap(id => {
               const n = floorPlan.nodes[id]
               return n ? [n.position.x, n.position.y] : []
             })
             if (pts.length < 6) return null
+
+            const isSelected = ui.selectedRoomId === room.id
+            const isHovered = hoveredRoomId === room.id
+            const baseOpacity = isSelected ? 0.3 : isHovered ? 0.25 : 0.18
+
+            // Centroid for label
+            const xs = room.nodeIds.map(id => floorPlan.nodes[id]?.position.x ?? 0)
+            const ys = room.nodeIds.map(id => floorPlan.nodes[id]?.position.y ?? 0)
+            const cx = xs.reduce((a, b) => a + b, 0) / xs.length
+            const cy = ys.reduce((a, b) => a + b, 0) / ys.length
+
+            const area = computeRoomArea(room, floorPlan.nodes, floorPlan.scale)
+
             return (
               <Group key={room.id}>
                 <Line
                   points={pts}
                   closed
                   fill={room.color}
-                  opacity={0.18}
+                  opacity={baseOpacity}
                   strokeWidth={0}
+                  onClick={e => { e.cancelBubble = true; handleRoomClick(room.id) }}
+                  onMouseEnter={() => setHoveredRoomId(room.id)}
+                  onMouseLeave={() => setHoveredRoomId(null)}
                 />
+                {/* Room outline */}
                 <Line
                   points={pts}
                   closed
                   fill="transparent"
-                  stroke={room.color}
-                  strokeWidth={1.5 / scale}
-                  dash={[6 / scale, 3 / scale]}
-                  opacity={0.5}
+                  stroke={isSelected ? room.color : room.color}
+                  strokeWidth={(isSelected ? 2 : 1.5) / scale}
+                  dash={isSelected ? undefined : [6 / scale, 3 / scale]}
+                  opacity={isSelected ? 0.8 : 0.5}
+                  listening={false}
                 />
-                {/* Room label */}
-                {(() => {
-                  const xs = room.nodeIds.map(id => floorPlan.nodes[id]?.position.x ?? 0)
-                  const ys = room.nodeIds.map(id => floorPlan.nodes[id]?.position.y ?? 0)
-                  const cx = xs.reduce((a, b) => a + b, 0) / xs.length
-                  const cy = ys.reduce((a, b) => a + b, 0) / ys.length
-                  return (
-                    <Text
-                      x={cx - 40}
-                      y={cy - 8}
-                      text={room.name}
-                      width={80}
-                      align="center"
-                      fontSize={12 / scale}
-                      fill={room.color}
-                      fontStyle="bold"
-                      listening={false}
-                    />
-                  )
-                })()}
+                {/* Room label with area */}
+                <Text
+                  x={cx - 50}
+                  y={cy - 14 / scale}
+                  text={`${room.name}${area > 0 ? `\n${area.toFixed(1)} m\u00B2` : ''}`}
+                  width={100}
+                  align="center"
+                  fontSize={12 / scale}
+                  lineHeight={1.4}
+                  fill={room.color}
+                  fontStyle="bold"
+                  listening={false}
+                />
               </Group>
             )
           })}
         </Layer>
 
         {/* Walls layer */}
-        <Layer>
+        <Layer listening={ui.editorMode === 'walls' || ui.editorMode === 'openings'}>
           {walls.map(wall => {
             const sn = floorPlan.nodes[wall.startNodeId]
             const en = floorPlan.nodes[wall.endNodeId]
             if (!sn || !en) return null
             const selected = ui.selectedWallId === wall.id
-            const wallThicknessPx = (wall.thickness * floorPlan.scale)
+
+            // Compute wall rectangle as filled polygon
+            const dx = en.position.x - sn.position.x
+            const dy = en.position.y - sn.position.y
+            const len = Math.sqrt(dx * dx + dy * dy)
+            if (len === 0) return null
+
+            const thicknessPx = wall.thickness * floorPlan.scale
+            const halfT = thicknessPx / 2
+            const nx = (-dy / len) * halfT
+            const ny = (dx / len) * halfT
+
+            // 4 corners of wall rectangle
+            const wallPts = [
+              sn.position.x + nx, sn.position.y + ny,
+              en.position.x + nx, en.position.y + ny,
+              en.position.x - nx, en.position.y - ny,
+              sn.position.x - nx, sn.position.y - ny,
+            ]
 
             return (
               <Group key={wall.id}>
-                {/* Thick wall body */}
+                {/* Thick wall body (filled polygon) */}
                 <Line
-                  points={[sn.position.x, sn.position.y, en.position.x, en.position.y]}
-                  stroke={selected ? '#0ea5e9' : '#64748b'}
-                  strokeWidth={wallThicknessPx / scale}
-                  lineCap="square"
-                  onClick={() => {
-                    if (ui.activeTool === 'select') {
-                      ui.setSelectedWall(wall.id)
-                      ui.setSelectedRoom(null)
-                    } else if (ui.activeTool === 'eraser') {
-                      store.deleteWall(wall.id)
-                      store.saveHistory()
-                    } else if (ui.activeTool === 'door') {
-                      store.addOpening(wall.id, {
-                        type: 'door', offsetAlongWall: 0.5,
-                        width: 0.9, height: 2.1, bottomOffset: 0
-                      })
-                    } else if (ui.activeTool === 'window') {
-                      store.addOpening(wall.id, {
-                        type: 'window', offsetAlongWall: 0.5,
-                        width: 1.0, height: 1.2, bottomOffset: 0.9
-                      })
-                    }
-                  }}
-                />
-                {/* Wall center line */}
-                <Line
-                  points={[sn.position.x, sn.position.y, en.position.x, en.position.y]}
-                  stroke={selected ? '#38bdf8' : '#94a3b8'}
+                  points={wallPts}
+                  closed
+                  fill={selected ? '#0c4a6e' : '#334155'}
+                  stroke={selected ? '#0ea5e9' : '#475569'}
                   strokeWidth={1 / scale}
-                  listening={false}
+                  onClick={e => { e.cancelBubble = true; handleWallClick(wall.id) }}
                 />
 
-                {/* Door/window markers */}
+                {/* Door/window symbols */}
                 {wall.openings.map(opening => {
-                  const ox = sn.position.x + (en.position.x - sn.position.x) * opening.offsetAlongWall
-                  const oy = sn.position.y + (en.position.y - sn.position.y) * opening.offsetAlongWall
-                  return (
-                    <Circle
-                      key={opening.id}
-                      x={ox} y={oy}
-                      radius={8 / scale}
-                      fill={opening.type === 'door' ? '#f59e0b' : '#06b6d4'}
-                      stroke="#fff"
-                      strokeWidth={1 / scale}
-                      listening={false}
-                    />
-                  )
+                  const ox = sn.position.x + dx * opening.offsetAlongWall
+                  const oy = sn.position.y + dy * opening.offsetAlongWall
+                  const wallAngle = Math.atan2(dy, dx) * 180 / Math.PI
+                  const isSelectedOpening = ui.selectedOpeningId === opening.id
+
+                  if (opening.type === 'door') {
+                    // Door: gap in wall + swing arc
+                    const doorWidthPx = opening.width * floorPlan.scale
+                    return (
+                      <Group key={opening.id}
+                        onClick={e => { e.cancelBubble = true; handleOpeningClick(wall.id, opening.id) }}
+                      >
+                        {/* Door gap (white rectangle over wall) */}
+                        <Line
+                          points={[
+                            ox - (dx / len) * doorWidthPx / 2 + nx, oy - (dy / len) * doorWidthPx / 2 + ny,
+                            ox + (dx / len) * doorWidthPx / 2 + nx, oy + (dy / len) * doorWidthPx / 2 + ny,
+                            ox + (dx / len) * doorWidthPx / 2 - nx, oy + (dy / len) * doorWidthPx / 2 - ny,
+                            ox - (dx / len) * doorWidthPx / 2 - nx, oy - (dy / len) * doorWidthPx / 2 - ny,
+                          ]}
+                          closed
+                          fill="#1e293b"
+                          strokeWidth={0}
+                          listening={false}
+                        />
+                        {/* Door swing arc */}
+                        <Arc
+                          x={ox - (dx / len) * doorWidthPx / 2}
+                          y={oy - (dy / len) * doorWidthPx / 2}
+                          innerRadius={0}
+                          outerRadius={doorWidthPx}
+                          angle={90}
+                          rotation={wallAngle}
+                          fill="transparent"
+                          stroke={isSelectedOpening ? '#f59e0b' : '#f59e0b'}
+                          strokeWidth={1 / scale}
+                          opacity={isSelectedOpening ? 1 : 0.6}
+                          dash={[4 / scale, 2 / scale]}
+                          listening={false}
+                        />
+                        {/* Door panel line */}
+                        <Line
+                          points={[
+                            ox - (dx / len) * doorWidthPx / 2,
+                            oy - (dy / len) * doorWidthPx / 2,
+                            ox + (dx / len) * doorWidthPx / 2,
+                            oy + (dy / len) * doorWidthPx / 2,
+                          ]}
+                          stroke={isSelectedOpening ? '#fbbf24' : '#f59e0b'}
+                          strokeWidth={2 / scale}
+                          listening={false}
+                        />
+                        {/* Selection ring */}
+                        {isSelectedOpening && (
+                          <Circle
+                            x={ox} y={oy}
+                            radius={10 / scale}
+                            stroke="#f59e0b"
+                            strokeWidth={2 / scale}
+                            fill="transparent"
+                            listening={false}
+                          />
+                        )}
+                      </Group>
+                    )
+                  } else if (opening.type === 'window') {
+                    // Window: parallel lines perpendicular to wall
+                    const winWidthPx = opening.width * floorPlan.scale
+                    const offset = halfT * 0.6
+                    return (
+                      <Group key={opening.id}
+                        onClick={e => { e.cancelBubble = true; handleOpeningClick(wall.id, opening.id) }}
+                      >
+                        {/* Window gap */}
+                        <Line
+                          points={[
+                            ox - (dx / len) * winWidthPx / 2 + nx, oy - (dy / len) * winWidthPx / 2 + ny,
+                            ox + (dx / len) * winWidthPx / 2 + nx, oy + (dy / len) * winWidthPx / 2 + ny,
+                            ox + (dx / len) * winWidthPx / 2 - nx, oy + (dy / len) * winWidthPx / 2 - ny,
+                            ox - (dx / len) * winWidthPx / 2 - nx, oy - (dy / len) * winWidthPx / 2 - ny,
+                          ]}
+                          closed
+                          fill="#1e293b"
+                          strokeWidth={0}
+                          listening={false}
+                        />
+                        {/* Window parallel lines */}
+                        <Line
+                          points={[
+                            ox - (dx / len) * winWidthPx / 2 + nx * 0.6, oy - (dy / len) * winWidthPx / 2 + ny * 0.6,
+                            ox + (dx / len) * winWidthPx / 2 + nx * 0.6, oy + (dy / len) * winWidthPx / 2 + ny * 0.6,
+                          ]}
+                          stroke={isSelectedOpening ? '#22d3ee' : '#06b6d4'}
+                          strokeWidth={2 / scale}
+                          listening={false}
+                        />
+                        <Line
+                          points={[
+                            ox - (dx / len) * winWidthPx / 2 - nx * 0.6, oy - (dy / len) * winWidthPx / 2 - ny * 0.6,
+                            ox + (dx / len) * winWidthPx / 2 - nx * 0.6, oy + (dy / len) * winWidthPx / 2 - ny * 0.6,
+                          ]}
+                          stroke={isSelectedOpening ? '#22d3ee' : '#06b6d4'}
+                          strokeWidth={2 / scale}
+                          listening={false}
+                        />
+                        {isSelectedOpening && (
+                          <Circle
+                            x={ox} y={oy}
+                            radius={10 / scale}
+                            stroke="#06b6d4"
+                            strokeWidth={2 / scale}
+                            fill="transparent"
+                            listening={false}
+                          />
+                        )}
+                      </Group>
+                    )
+                  } else {
+                    // Archway: dashed gap
+                    const archWidthPx = opening.width * floorPlan.scale
+                    return (
+                      <Group key={opening.id}
+                        onClick={e => { e.cancelBubble = true; handleOpeningClick(wall.id, opening.id) }}
+                      >
+                        <Line
+                          points={[
+                            ox - (dx / len) * archWidthPx / 2 + nx, oy - (dy / len) * archWidthPx / 2 + ny,
+                            ox + (dx / len) * archWidthPx / 2 + nx, oy + (dy / len) * archWidthPx / 2 + ny,
+                            ox + (dx / len) * archWidthPx / 2 - nx, oy + (dy / len) * archWidthPx / 2 - ny,
+                            ox - (dx / len) * archWidthPx / 2 - nx, oy - (dy / len) * archWidthPx / 2 - ny,
+                          ]}
+                          closed
+                          fill="#1e293b"
+                          strokeWidth={0}
+                          listening={false}
+                        />
+                        <Line
+                          points={[
+                            ox - (dx / len) * archWidthPx / 2, oy - (dy / len) * archWidthPx / 2,
+                            ox + (dx / len) * archWidthPx / 2, oy + (dy / len) * archWidthPx / 2,
+                          ]}
+                          stroke={isSelectedOpening ? '#a78bfa' : '#8b5cf6'}
+                          strokeWidth={2 / scale}
+                          dash={[4 / scale, 4 / scale]}
+                          listening={false}
+                        />
+                        {isSelectedOpening && (
+                          <Circle
+                            x={ox} y={oy}
+                            radius={10 / scale}
+                            stroke="#8b5cf6"
+                            strokeWidth={2 / scale}
+                            fill="transparent"
+                            listening={false}
+                          />
+                        )}
+                      </Group>
+                    )
+                  }
                 })}
 
                 {/* Wall length label */}
                 {ui.showMeasurements && (() => {
-                  const dx = en.position.x - sn.position.x
-                  const dy = en.position.y - sn.position.y
-                  const len = Math.sqrt(dx * dx + dy * dy) / floorPlan.scale
+                  const wallLen = len / floorPlan.scale
                   const mx = (sn.position.x + en.position.x) / 2
                   const my = (sn.position.y + en.position.y) / 2
                   const angle = Math.atan2(dy, dx) * 180 / Math.PI
+                  // Offset label perpendicular to wall
+                  const labelOffset = halfT + 10 / scale
+                  const lx = mx + (-dy / len) * labelOffset
+                  const ly = my + (dx / len) * labelOffset
                   return (
                     <Text
-                      x={mx - 25}
-                      y={my - 16 / scale}
-                      text={`${len.toFixed(1)}m`}
-                      fontSize={11 / scale}
+                      x={lx - 25}
+                      y={ly - 6 / scale}
+                      text={`${wallLen.toFixed(2)}m`}
+                      fontSize={10 / scale}
                       fill="#94a3b8"
                       rotation={angle > 90 || angle < -90 ? angle + 180 : angle}
-                      offsetX={0}
                       listening={false}
                     />
                   )
@@ -363,21 +629,101 @@ export default function FloorPlanCanvas() {
             )
           })}
 
+          {/* Preview opening being placed (node-to-node) */}
+          {openingStart && cursorPos && ui.editorMode === 'openings' && ui.selectedOpeningCatalogId && (() => {
+            const dx = cursorPos.x - openingStart.pos.x
+            const dy = cursorPos.y - openingStart.pos.y
+            const len = Math.sqrt(dx * dx + dy * dy)
+            if (len === 0) return null
+
+            const catalogItem = OPENINGS_BY_ID[ui.selectedOpeningCatalogId]
+            const color = catalogItem?.type === 'window' ? '#06b6d4' : '#f59e0b'
+
+            return (
+              <Group listening={false}>
+                {/* Dashed preview line */}
+                <Line
+                  points={[openingStart.pos.x, openingStart.pos.y, cursorPos.x, cursorPos.y]}
+                  stroke={color}
+                  strokeWidth={3 / scale}
+                  opacity={0.7}
+                  dash={[8 / scale, 4 / scale]}
+                />
+                {/* Start node indicator */}
+                <Circle
+                  x={openingStart.pos.x} y={openingStart.pos.y}
+                  radius={6 / scale}
+                  fill={color}
+                  opacity={0.8}
+                />
+                {/* Label */}
+                <Text
+                  x={(openingStart.pos.x + cursorPos.x) / 2 - 30}
+                  y={(openingStart.pos.y + cursorPos.y) / 2 - 16 / scale}
+                  text={catalogItem?.name ?? 'Opening'}
+                  fontSize={10 / scale}
+                  fill={color}
+                  fontStyle="bold"
+                />
+              </Group>
+            )
+          })()}
+
           {/* Preview wall being drawn */}
-          {drawStart && cursorPos && ui.activeTool === 'wall' && (
-            <Line
-              points={[drawStart.pos.x, drawStart.pos.y, cursorPos.x, cursorPos.y]}
-              stroke="#0ea5e9"
-              strokeWidth={DEFAULT_WALL_THICKNESS * floorPlan.scale / scale}
-              dash={[10 / scale, 5 / scale]}
-              lineCap="square"
-              listening={false}
-            />
-          )}
+          {drawStart && cursorPos && ui.editorMode === 'walls' && ui.activeTool === 'wall' && (() => {
+            const dx = cursorPos.x - drawStart.pos.x
+            const dy = cursorPos.y - drawStart.pos.y
+            const len = Math.sqrt(dx * dx + dy * dy)
+            if (len === 0) return null
+
+            const thicknessPx = DEFAULT_WALL_THICKNESS * floorPlan.scale
+            const halfT = thicknessPx / 2
+            const nx = (-dy / len) * halfT
+            const ny = (dx / len) * halfT
+
+            const previewPts = [
+              drawStart.pos.x + nx, drawStart.pos.y + ny,
+              cursorPos.x + nx, cursorPos.y + ny,
+              cursorPos.x - nx, cursorPos.y - ny,
+              drawStart.pos.x - nx, drawStart.pos.y - ny,
+            ]
+
+            const wallLen = len / floorPlan.scale
+            const mx = (drawStart.pos.x + cursorPos.x) / 2
+            const my = (drawStart.pos.y + cursorPos.y) / 2
+            const labelOffset = halfT + 12 / scale
+            const lx = mx + (-dy / len) * labelOffset
+            const ly = my + (dx / len) * labelOffset
+            const angle = Math.atan2(dy, dx) * 180 / Math.PI
+
+            return (
+              <Group listening={false}>
+                <Line
+                  points={previewPts}
+                  closed
+                  fill="#0c4a6e"
+                  stroke="#0ea5e9"
+                  strokeWidth={1 / scale}
+                  opacity={0.7}
+                  dash={[6 / scale, 3 / scale]}
+                />
+                {/* Real-time measurement */}
+                <Text
+                  x={lx - 25}
+                  y={ly - 6 / scale}
+                  text={`${wallLen.toFixed(2)}m`}
+                  fontSize={11 / scale}
+                  fill="#38bdf8"
+                  fontStyle="bold"
+                  rotation={angle > 90 || angle < -90 ? angle + 180 : angle}
+                />
+              </Group>
+            )
+          })()}
         </Layer>
 
         {/* Nodes layer */}
-        <Layer>
+        <Layer listening={ui.editorMode === 'walls' || ui.editorMode === 'openings'}>
           {nodes.map(node => {
             const hovered = hoveredNodeId === node.id
             return (
@@ -385,11 +731,11 @@ export default function FloorPlanCanvas() {
                 key={node.id}
                 x={node.position.x}
                 y={node.position.y}
-                radius={(hovered ? 7 : 5) / scale}
-                fill={hovered ? '#0ea5e9' : '#334155'}
+                radius={(hovered ? 6 : 4) / scale}
+                fill={hovered ? '#0ea5e9' : '#475569'}
                 stroke={hovered ? '#38bdf8' : '#64748b'}
                 strokeWidth={1.5 / scale}
-                draggable={ui.activeTool === 'select'}
+                draggable={isDraggable}
                 onDragMove={e => {
                   const raw = { x: e.target.x(), y: e.target.y() }
                   const snapped = { x: snapToGrid(raw.x, GRID_SIZE), y: snapToGrid(raw.y, GRID_SIZE) }
@@ -397,16 +743,38 @@ export default function FloorPlanCanvas() {
                   store.updateNode(node.id, snapped)
                 }}
                 onDragEnd={() => store.saveHistory()}
-                onClick={() => {
-                  if (ui.activeTool === 'eraser') {
-                    store.deleteNode(node.id)
-                    store.saveHistory()
-                  } else if (ui.activeTool === 'wall' && drawStart) {
-                    // Close wall to this existing node
-                    if (node.id !== drawStart.nodeId) {
-                      store.addWall(drawStart.nodeId, node.id)
+                onClick={e => {
+                  e.cancelBubble = true
+                  if (ui.editorMode === 'walls') {
+                    if (ui.activeTool === 'eraser') {
+                      store.deleteNode(node.id)
                       store.saveHistory()
-                      setDrawStart({ nodeId: node.id, pos: node.position })
+                    } else if (ui.activeTool === 'wall' && drawStart) {
+                      if (node.id !== drawStart.nodeId) {
+                        store.addWall(drawStart.nodeId, node.id)
+                        store.saveHistory()
+                        setDrawStart({ nodeId: node.id, pos: node.position })
+                      }
+                    }
+                  } else if (ui.editorMode === 'openings' && ui.selectedOpeningCatalogId) {
+                    if (!openingStart) {
+                      setOpeningStart({ nodeId: node.id, pos: node.position })
+                    } else if (node.id !== openingStart.nodeId) {
+                      const catalogItem = OPENINGS_BY_ID[ui.selectedOpeningCatalogId]
+                      if (catalogItem) {
+                        const wallId = store.addWall(openingStart.nodeId, node.id)
+                        store.addOpening(wallId, {
+                          type: catalogItem.type,
+                          offsetAlongWall: 0.5,
+                          width: catalogItem.width,
+                          height: catalogItem.height,
+                          bottomOffset: catalogItem.bottomOffset,
+                        })
+                        store.saveHistory()
+                      }
+                      setOpeningStart(null)
+                    } else {
+                      setOpeningStart(null)
                     }
                   }
                 }}
@@ -417,11 +785,19 @@ export default function FloorPlanCanvas() {
           })}
 
           {/* Cursor snap indicator */}
-          {cursorPos && ui.activeTool === 'wall' && (
+          {cursorPos && ui.editorMode === 'walls' && ui.activeTool === 'wall' && (
             <Circle
               x={cursorPos.x} y={cursorPos.y}
               radius={4 / scale}
               fill={hoveredNodeId ? '#0ea5e9' : '#64748b'}
+              listening={false}
+            />
+          )}
+          {cursorPos && ui.editorMode === 'openings' && ui.selectedOpeningCatalogId && (
+            <Circle
+              x={cursorPos.x} y={cursorPos.y}
+              radius={4 / scale}
+              fill={hoveredNodeId ? '#f59e0b' : '#64748b'}
               listening={false}
             />
           )}

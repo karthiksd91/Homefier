@@ -54,6 +54,16 @@ function polygonKey(nodeIds: string[]): string {
   return sorted.join(',')
 }
 
+export function computeRoomArea(room: Room, nodes: Record<string, import('@/types').WallNode>, scale: number): number {
+  if (room.nodeIds.length < 3 || scale <= 0) return 0
+  const pts = room.nodeIds
+    .map(id => nodes[id]?.position)
+    .filter((p): p is Point2D => !!p)
+  if (pts.length < 3) return 0
+  const areaPx = Math.abs(signedPolygonArea(pts))
+  return areaPx / (scale * scale)
+}
+
 export function detectRooms(floorPlan: FloorPlan): Room[] {
   const { graph } = buildGraph(floorPlan)
   const nodeIds = Object.keys(graph)

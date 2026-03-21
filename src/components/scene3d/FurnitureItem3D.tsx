@@ -17,6 +17,7 @@ export default function FurnitureItem3D({ furniture, selected, ghost, onClick }:
 
   const { width, depth, height } = catalogItem.dimensions
   const scale = furniture.scale
+  const halfH = (height * scale) / 2
 
   return (
     <group
@@ -25,9 +26,13 @@ export default function FurnitureItem3D({ furniture, selected, ghost, onClick }:
     >
       <mesh
         ref={ref}
-        castShadow
-        receiveShadow
-        onClick={e => { e.stopPropagation(); onClick?.() }}
+        // Lift mesh so bottom sits on the floor (y=0)
+        position={[0, halfH, 0]}
+        castShadow={!ghost}
+        receiveShadow={!ghost}
+        // Ghost is purely visual — disable raycasting so clicks reach the floor plane
+        raycast={ghost ? () => {} : undefined}
+        onClick={ghost ? undefined : e => { e.stopPropagation(); onClick?.() }}
         scale={[scale, scale, scale]}
       >
         <boxGeometry args={[width, height, depth]} />
@@ -36,10 +41,11 @@ export default function FurnitureItem3D({ furniture, selected, ghost, onClick }:
           roughness={0.7}
           metalness={0.1}
           transparent={ghost}
-          opacity={ghost ? 0.5 : 1}
+          opacity={ghost ? 0.45 : 1}
           emissive={selected ? '#0369a1' : '#000'}
           emissiveIntensity={selected ? 0.3 : 0}
           wireframe={ghost}
+          depthWrite={!ghost}
         />
       </mesh>
 

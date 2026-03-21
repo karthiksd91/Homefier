@@ -1,5 +1,5 @@
 import { nanoid } from 'nanoid'
-import type { WallNode, WallSegment } from '@/types'
+import type { WallNode, WallSegment, WallOpening } from '@/types'
 import { DEFAULT_WALL_HEIGHT, DEFAULT_WALL_THICKNESS } from '@/lib/constants'
 
 // ── Constants ──────────────────────────────────────────────
@@ -98,13 +98,17 @@ export async function detectFloorPlanFromImage(
   const { nodes, walls } = buildFloorPlanFromLines(filteredH, filteredV, snapR)
 
   // Step 8: Snap all nodes to the grid
-  onProgress?.('Snapping to grid...', 90)
+  onProgress?.('Snapping to grid...', 85)
   snapNodesToGrid(nodes, GRID_SIZE)
 
   // Step 9: Estimate scale from content dimensions
   const estimatedScale = estimateScale(nodes, contentOnCanvas)
 
-  // Step 10: Create the processed (aligned) image as a blob URL
+  // Step 10: Detect doors & windows from gaps between collinear walls
+  onProgress?.('Detecting doors & windows...', 90)
+  detectOpeningsFromGaps(nodes, walls, estimatedScale)
+
+  // Step 11: Create the processed (aligned) image as a blob URL
   onProgress?.('Finalizing...', 95)
   const processedImageUrl = await canvasToBlobUrl(alignedCanvas)
 
@@ -620,6 +624,180 @@ function snapNodesToGrid(nodes: Record<string, WallNode>, gridSize: number) {
   for (const node of Object.values(nodes)) {
     node.position.x = Math.round(node.position.x / gridSize) * gridSize
     node.position.y = Math.round(node.position.y / gridSize) * gridSize
+  }
+}
+
+// ── Scale estimation ───────────────────────────────────────
+
+// ── Door/window gap detection ─────────────────────────────
+
+function detectOpeningsFromGaps(
+  nodes: Record<string, WallNode>,
+  walls: Record<string, WallSegment>,
+  scale: number,
+): void {
+  const MIN_OPENING_M = 0.4
+  const MAX_OPENING_M = 2.5
+
+  interface WInfo {
+    id: string
+    isH: boolean
+    perp: number
+    min: number
+    max: number
+    minNode: string
+    maxNode: string
+  }
+
+  const infos: WInfo[] = []
+
+  for (const wall of Object.values(walls)) {
+    const n1 = nodes[wall.startNodeId]
+    const n2 = nodes[wall.endNodeId]
+    if (!n1 || !n2) continue
+
+    const dx = n2.position.x - n1.position.x
+    const dy = n2.position.y - n1.position.y
+    const absDx = Math.abs(dx)
+    const absDy = Math.abs(dy)
+
+    // After grid snapping walls are axis-aligned; also handle near-axis walls
+    if (absDx > 0 && absDy <= absDx * 0.15) {
+      // Horizontal
+      infos.push({
+        id: wall.id,
+        isH: true,
+        perp: Math.round((n1.position.y + n2.position.y) / 2),
+        min: Math.min(n1.position.x, n2.position.x),
+        max: Math.max(n1.position.x, n2.position.x),
+        minNode: n1.position.x <= n2.position.x ? wall.startNodeId : wall.endNodeId,
+        maxNode: n1.position.x <= n2.position.x ? wall.endNodeId : wall.startNodeId,
+      })
+    } else if (absDy > 0 && absDx <= absDy * 0.15) {
+      // Vertical
+      infos.push({
+        id: wall.id,
+        isH: false,
+        perp: Math.round((n1.position.x + n2.position.x) / 2),
+        min: Math.min(n1.position.y, n2.position.y),
+        max: Math.max(n1.position.y, n2.position.y),
+        minNode: n1.position.y <= n2.position.y ? wall.startNodeId : wall.endNodeId,
+        maxNode: n1.position.y <= n2.position.y ? wall.endNodeId : wall.startNodeId,
+      })
+    }
+  }
+
+  // Group by orientation + perpendicular coordinate (tolerance for near-grid alignment)
+  const PERP_TOLERANCE = 10
+  const groups: WInfo[][] = []
+  const assigned = new Set<number>()
+
+  for (let i = 0; i < infos.length; i++) {
+    if (assigned.has(i)) continue
+    const group = [infos[i]]
+    assigned.add(i)
+
+    for (let j = i + 1; j < infos.length; j++) {
+      if (assigned.has(j)) continue
+      if (infos[j].isH !== infos[i].isH) continue
+      if (Math.abs(infos[j].perp - infos[i].perp) <= PERP_TOLERANCE) {
+        group.push(infos[j])
+        assigned.add(j)
+      }
+    }
+
+    if (group.length >= 2) groups.push(group)
+  }
+
+  // Within each group, find gaps between consecutive walls
+  for (const group of groups) {
+    group.sort((a, b) => a.min - b.min)
+
+    let i = 0
+    while (i < group.length - 1) {
+      const wA = group[i]
+      const wB = group[i + 1]
+      const gapPx = wB.min - wA.max
+      const gapM = scale > 0 ? gapPx / scale : 0
+
+      if (gapM >= MIN_OPENING_M && gapM <= MAX_OPENING_M) {
+        // Verify gap endpoints are not intersection nodes (T-junctions / corners)
+        const gapEndA = wA.maxNode
+        const gapStartB = wB.minNode
+        const wallsAtA = Object.values(walls).filter(
+          w => w.startNodeId === gapEndA || w.endNodeId === gapEndA,
+        ).length
+        const wallsAtB = Object.values(walls).filter(
+          w => w.startNodeId === gapStartB || w.endNodeId === gapStartB,
+        ).length
+
+        if (wallsAtA <= 1 && wallsAtB <= 1) {
+          // Merge into one wall with an opening at the gap
+          const newMin = wA.min
+          const newMax = wB.max
+          const newLen = newMax - newMin
+          const oldALen = wA.max - wA.min
+          const oldBLen = wB.max - wB.min
+          const gapCenter = (wA.max + wB.min) / 2
+          const gapOffset = (gapCenter - newMin) / newLen
+
+          // Remap existing openings from both walls
+          const remapA = (walls[wA.id]?.openings ?? []).map(o => ({
+            ...o,
+            offsetAlongWall: oldALen > 0 ? (o.offsetAlongWall * oldALen) / newLen : 0,
+          }))
+          const remapB = (walls[wB.id]?.openings ?? []).map(o => ({
+            ...o,
+            offsetAlongWall: oldBLen > 0 ? ((wB.min - newMin) + o.offsetAlongWall * oldBLen) / newLen : 0,
+          }))
+
+          const widthM = Math.round(gapM * 10) / 10
+          const type: WallOpening['type'] = widthM < 0.6 ? 'window' : 'door'
+
+          const newOpening: WallOpening = {
+            id: nanoid(),
+            type,
+            offsetAlongWall: gapOffset,
+            width: Math.max(0.6, widthM),
+            height: type === 'door' ? 2.1 : 1.2,
+            bottomOffset: type === 'door' ? 0 : 0.9,
+          }
+
+          const mergedId = nanoid()
+          walls[mergedId] = {
+            id: mergedId,
+            startNodeId: wA.minNode,
+            endNodeId: wB.maxNode,
+            thickness: DEFAULT_WALL_THICKNESS,
+            height: DEFAULT_WALL_HEIGHT,
+            materialId: 'wall-white',
+            openings: [...remapA, newOpening, ...remapB],
+          }
+
+          // Remove old walls
+          delete walls[wA.id]
+          delete walls[wB.id]
+
+          // Remove orphaned gap nodes
+          for (const nid of [gapEndA, gapStartB]) {
+            const stillUsed = Object.values(walls).some(
+              w => w.startNodeId === nid || w.endNodeId === nid,
+            )
+            if (!stillUsed) delete nodes[nid]
+          }
+
+          // Update wB in group for potential chaining
+          wB.id = mergedId
+          wB.min = newMin
+          wB.minNode = wA.minNode
+
+          group.splice(i, 1)
+          continue // re-check at same index
+        }
+      }
+
+      i++
+    }
   }
 }
 

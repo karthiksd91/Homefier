@@ -1,14 +1,13 @@
 import { useNavigate, useBlocker } from 'react-router-dom'
 import { motion } from 'framer-motion'
-import { ArrowRight, Info, Ruler, AlertTriangle, Save, Check } from 'lucide-react'
+import { AlertTriangle, Info } from 'lucide-react'
 import Navbar from '@/components/layout/Navbar'
 import FloorPlanCanvas from '@/components/floorplan/FloorPlanCanvas'
 import FloorPlanToolbar from '@/components/floorplan/FloorPlanToolbar'
-import RoomPropertiesPanel from '@/components/floorplan/RoomPropertiesPanel'
+import EditorSidebar from '@/components/floorplan/EditorSidebar'
 import { useFloorPlanStore } from '@/store/useFloorPlanStore'
 import { useFurnitureStore } from '@/store/useFurnitureStore'
 import { useSavedPlansStore } from '@/store/useSavedPlansStore'
-import { useUIStore } from '@/store/useUIStore'
 import { useState, useEffect, useCallback } from 'react'
 
 export default function FloorPlanEditorPage() {
@@ -16,7 +15,6 @@ export default function FloorPlanEditorPage() {
   const { floorPlan, setScale, isDirty, markClean, currentSaveId, setCurrentSaveId } = useFloorPlanStore()
   const furnitureItems = useFurnitureStore(s => s.items)
   const { savePlan, updatePlan } = useSavedPlansStore()
-  const { selectedRoomId } = useUIStore()
 
   const [showScaleDialog, setShowScaleDialog] = useState(false)
   const [scaleInput, setScaleInput] = useState('')
@@ -26,10 +24,7 @@ export default function FloorPlanEditorPage() {
   const [saveFlash, setSaveFlash] = useState(false)
   const [saving, setSaving] = useState(false)
 
-  const roomCount = Object.keys(floorPlan.rooms).length
   const wallCount = Object.keys(floorPlan.walls).length
-  const isScaleSet = floorPlan.scale > 0
-  const canProceed = roomCount > 0 && isScaleSet
   const hasContent = wallCount > 0
 
   // --- Beforeunload: warn on refresh / close tab ---
@@ -119,102 +114,40 @@ export default function FloorPlanEditorPage() {
     <div className="h-full flex flex-col bg-slate-900">
       <Navbar />
 
-      <div className="flex-1 relative overflow-hidden">
-        <FloorPlanCanvas />
-        <FloorPlanToolbar />
+      <div className="flex-1 flex overflow-hidden">
+        {/* Canvas area */}
+        <div className="flex-1 relative overflow-hidden">
+          <FloorPlanCanvas />
+          <FloorPlanToolbar />
 
-        {/* Selected room properties */}
-        {selectedRoomId && <RoomPropertiesPanel />}
-
-        {/* Save button — top right */}
-        <div className="absolute top-4 right-4 z-20 flex items-center gap-2">
-          <button
-            onClick={handleSave}
-            disabled={saving || !hasContent}
-            className={`
-              flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium transition-all border
-              ${saveFlash
-                ? 'bg-emerald-500/20 border-emerald-500/30 text-emerald-300'
-                : isDirty && hasContent
-                  ? 'glass-dark border-amber-500/30 text-amber-300 hover:border-amber-500/50 hover:text-amber-200'
-                  : 'glass-dark border-white/10 text-slate-400 hover:text-white hover:border-white/20'
-              }
-              ${(!hasContent || saving) ? 'opacity-50 cursor-not-allowed' : ''}
-            `}
-          >
-            {saveFlash ? <Check size={13} /> : <Save size={13} />}
-            {saveFlash ? 'Saved' : saving ? 'Saving...' : 'Save'}
-            {isDirty && hasContent && !saveFlash && (
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 ml-0.5" />
-            )}
-          </button>
-        </div>
-
-        {/* Status bar */}
-        <div className="absolute bottom-4 left-4 flex items-center gap-3 z-20">
-          <div className="glass-dark rounded-xl px-4 py-2 flex items-center gap-3 text-xs border border-white/10">
-            <span className="text-slate-400">
-              Walls: <span className="text-white font-medium">{wallCount}</span>
-            </span>
-            <span className="w-px h-3 bg-slate-700" />
-            <span className="text-slate-400">
-              Rooms: <span className="text-white font-medium">{roomCount}</span>
-            </span>
-            <span className="w-px h-3 bg-slate-700" />
-            <span className="text-slate-400">
-              Scale: <span className={isScaleSet ? 'text-emerald-400 font-medium' : 'text-amber-400'}>
-                {isScaleSet ? `${floorPlan.scale.toFixed(0)} px/m` : 'Not set'}
-              </span>
-            </span>
-          </div>
-
-          <button
-            onClick={() => setShowScaleDialog(true)}
-            className="flex items-center gap-1.5 px-3 py-2 glass-dark rounded-xl text-xs text-slate-300 hover:text-white border border-white/10 hover:border-white/20 transition-all"
-          >
-            <Ruler size={12} />
-            Set Scale
-          </button>
-        </div>
-
-        {/* Instructions */}
-        {wallCount === 0 && (
-          <div className="absolute bottom-4 right-4 max-w-xs glass-dark rounded-xl p-4 text-xs text-slate-400 border border-white/10 z-20">
-            <div className="flex items-start gap-2">
-              <Info size={14} className="text-primary-400 shrink-0 mt-0.5" />
-              <div>
-                <p className="text-white font-medium mb-1">How to draw</p>
-                <ul className="space-y-0.5">
-                  <li>• Click to place wall endpoints</li>
-                  <li>• Click existing nodes to connect walls</li>
-                  <li>• Double-click or press Esc to stop drawing</li>
-                  <li>• Close a polygon to create a room</li>
-                  <li>• Scroll to zoom, drag (Select mode) to pan</li>
-                </ul>
+          {/* Instructions (first-time) */}
+          {wallCount === 0 && (
+            <div className="absolute bottom-4 left-4 max-w-xs glass-dark rounded-xl p-4 text-xs text-slate-400 border border-white/10 z-20">
+              <div className="flex items-start gap-2">
+                <Info size={14} className="text-primary-400 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-white font-medium mb-1">How to draw</p>
+                  <ul className="space-y-0.5">
+                    <li>- Click to place wall endpoints</li>
+                    <li>- Click existing nodes to connect walls</li>
+                    <li>- Double-click or Esc to stop drawing</li>
+                    <li>- Close a polygon to create a room</li>
+                    <li>- Scroll to zoom, drag (Select mode) to pan</li>
+                  </ul>
+                </div>
               </div>
             </div>
-          </div>
-        )}
-
-        {/* Proceed button */}
-        <div className="absolute bottom-4 right-4 z-20">
-          {canProceed ? (
-            <motion.button
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              onClick={() => navigate('/design')}
-              className="flex items-center gap-2 px-5 py-3 bg-primary-600 hover:bg-primary-500 text-white font-semibold rounded-xl shadow-lg transition-all"
-            >
-              Proceed to 3D Design
-              <ArrowRight size={16} />
-            </motion.button>
-          ) : roomCount > 0 && !isScaleSet ? (
-            <div className="flex items-center gap-2 px-4 py-2.5 bg-amber-500/20 border border-amber-500/30 text-amber-300 rounded-xl text-sm">
-              <AlertTriangle size={14} />
-              Set scale to proceed
-            </div>
-          ) : null}
+          )}
         </div>
+
+        {/* Right sidebar */}
+        <EditorSidebar
+          onSetScale={() => setShowScaleDialog(true)}
+          onSave={handleSave}
+          onProceed={() => navigate('/design')}
+          saveFlash={saveFlash}
+          saving={saving}
+        />
       </div>
 
       {/* Scale calibration dialog */}
