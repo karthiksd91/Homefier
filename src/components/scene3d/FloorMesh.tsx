@@ -26,7 +26,7 @@ export default function FloorMesh({ data, isCeiling = false, selected, onClick }
     <mesh
       geometry={geometry}
       position={[0, data.y, 0]}
-      rotation={isCeiling ? [Math.PI / 2, 0, 0] : [-Math.PI / 2, 0, 0]}
+      rotation={[-Math.PI / 2, 0, 0]}
       receiveShadow={!isCeiling}
       castShadow={false}
       onClick={e => { e.stopPropagation(); onClick?.() }}

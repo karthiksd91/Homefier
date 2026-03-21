@@ -59,17 +59,16 @@ export default function Scene3D({ mode = 'design' }: Props) {
           />
         )}
 
-        {/* Invisible floor plane for furniture placement */}
+        {/* Floor plane for furniture placement — must be raycastable (no visible={false}) */}
         {pendingFurnitureId && (
           <mesh
             position={[0, 0.001, 0]}
             rotation={[-Math.PI / 2, 0, 0]}
-            visible={false}
             onPointerMove={handleFloorMove}
             onClick={handleFloorClick}
           >
             <planeGeometry args={[200, 200]} />
-            <meshBasicMaterial />
+            <meshBasicMaterial transparent opacity={0} depthWrite={false} />
           </mesh>
         )}
       </Suspense>

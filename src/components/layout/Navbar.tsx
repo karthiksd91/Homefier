@@ -1,10 +1,11 @@
 import { useNavigate, useLocation } from 'react-router-dom'
-import { Home, Upload, Grid3X3, Sofa, Play } from 'lucide-react'
+import { Home, Upload, Grid3X3, Sofa, Play, FolderOpen } from 'lucide-react'
 import { useFloorPlanStore } from '@/store/useFloorPlanStore'
 
 const STEPS = [
   { path: '/', label: 'Home', icon: Home },
   { path: '/upload', label: 'Upload', icon: Upload },
+  { path: '/saved', label: 'Saved', icon: FolderOpen },
   { path: '/floorplan', label: 'Floor Plan', icon: Grid3X3 },
   { path: '/design', label: 'Design', icon: Sofa },
   { path: '/walkthrough', label: 'Walkthrough', icon: Play },
@@ -20,7 +21,7 @@ export default function Navbar() {
   const hasScale = floorPlan.scale > 0
 
   function isEnabled(path: string) {
-    if (path === '/' || path === '/upload') return true
+    if (path === '/' || path === '/upload' || path === '/saved') return true
     if (path === '/floorplan') return hasSketch || Object.keys(floorPlan.walls).length > 0
     if (path === '/design') return hasRooms && hasScale
     if (path === '/walkthrough') return hasRooms

@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import type { FloorPlan, WallSegment, WallNode, Room } from '@/types'
+import type { FloorPlan, WallSegment, WallNode, Room, WallOpening } from '@/types'
 
 export interface WallMeshData {
   id: string
@@ -9,6 +9,7 @@ export interface WallMeshData {
   height: number
   thickness: number
   materialId: string
+  openings: WallOpening[]
 }
 
 export interface FloorMeshData {
@@ -44,6 +45,20 @@ function wallLength(wall: WallSegment, floorPlan: FloorPlan): number {
 export function extrudeFloorPlan(floorPlan: FloorPlan): ExtrudedScene {
   const scale = floorPlan.scale || 100
 
+  // Compute centroid of all nodes to center the model at origin
+  const allNodes = Object.values(floorPlan.nodes)
+  let centroidX = 0
+  let centroidZ = 0
+  if (allNodes.length > 0) {
+    for (const node of allNodes) {
+      const [wx, wz] = canvasToWorld(node.position.x, node.position.y, scale)
+      centroidX += wx
+      centroidZ += wz
+    }
+    centroidX /= allNodes.length
+    centroidZ /= allNodes.length
+  }
+
   const walls: WallMeshData[] = Object.values(floorPlan.walls).map(wall => {
     const start = getNode(floorPlan, wall.startNodeId)
     const end = getNode(floorPlan, wall.endNodeId)
@@ -56,18 +71,19 @@ export function extrudeFloorPlan(floorPlan: FloorPlan): ExtrudedScene {
     const length = Math.sqrt(dx * dx + dz * dz)
     const angle = Math.atan2(dz, dx)
 
-    const cx = (sx + ex) / 2
+    const cx = (sx + ex) / 2 - centroidX
     const cy = wall.height / 2
-    const cz = (sz + ez) / 2
+    const cz = (sz + ez) / 2 - centroidZ
 
     return {
       id: wall.id,
-      position: [cx, cy, cz],
+      position: [cx, cy, cz] as [number, number, number],
       rotation: -angle,
       width: length,
       height: wall.height,
       thickness: wall.thickness,
       materialId: wall.materialId,
+      openings: wall.openings,
     }
   })
 
@@ -76,13 +92,15 @@ export function extrudeFloorPlan(floorPlan: FloorPlan): ExtrudedScene {
   const ceilings: FloorMeshData[] = []
 
   Object.values(floorPlan.rooms).forEach(room => {
+    // Use [wx, -wz] so that after ShapeGeometry rotation of -PI/2 around X,
+    // the vertices land at the correct (wx, 0, wz) world positions
     const verts: [number, number][] = room.nodeIds.map(nodeId => {
       const node = getNode(floorPlan, nodeId)
       const [wx, wz] = canvasToWorld(node.position.x, node.position.y, scale)
-      return [wx, wz]
+      return [wx - centroidX, -(wz - centroidZ)]
     })
 
-    // Ensure CCW winding (THREE.Shape expects CCW)
+    // Ensure CCW winding (THREE.Shape expects CCW for front face)
     const area = signedArea(verts)
     const ordered = area < 0 ? [...verts].reverse() : verts
 

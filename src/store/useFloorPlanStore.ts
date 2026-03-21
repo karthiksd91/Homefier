@@ -24,6 +24,8 @@ interface FloorPlanStore {
   floorPlan: FloorPlan
   history: FloorPlan[]
   historyIndex: number
+  isDirty: boolean
+  currentSaveId: string | null
 
   // Sketch
   setSketchImage: (url: string) => void
@@ -54,6 +56,10 @@ interface FloorPlanStore {
   undo: () => void
   redo: () => void
 
+  // Save state
+  markClean: () => void
+  setCurrentSaveId: (id: string | null) => void
+
   // Reset
   reset: () => void
 }
@@ -63,15 +69,18 @@ export const useFloorPlanStore = create<FloorPlanStore>()(
     floorPlan: DEFAULT_FLOOR_PLAN,
     history: [],
     historyIndex: -1,
+    isDirty: false,
+    currentSaveId: null,
 
-    setSketchImage: (url) => set(state => { state.floorPlan.sketchImageUrl = url }),
-    setSketchOpacity: (opacity) => set(state => { state.floorPlan.sketchOpacity = opacity }),
-    setScale: (scale) => set(state => { state.floorPlan.scale = scale }),
+    setSketchImage: (url) => set(state => { state.floorPlan.sketchImageUrl = url; state.isDirty = true }),
+    setSketchOpacity: (opacity) => set(state => { state.floorPlan.sketchOpacity = opacity; state.isDirty = true }),
+    setScale: (scale) => set(state => { state.floorPlan.scale = scale; state.isDirty = true }),
 
     addNode: (position) => {
       const id = nanoid()
       set(state => {
         state.floorPlan.nodes[id] = { id, position }
+        state.isDirty = true
       })
       return id
     },
@@ -79,18 +88,19 @@ export const useFloorPlanStore = create<FloorPlanStore>()(
     updateNode: (id, position) => set(state => {
       if (state.floorPlan.nodes[id]) {
         state.floorPlan.nodes[id].position = position
+        state.isDirty = true
       }
     }),
 
     deleteNode: (id) => set(state => {
       delete state.floorPlan.nodes[id]
-      // Remove connected walls
       Object.keys(state.floorPlan.walls).forEach(wId => {
         const w = state.floorPlan.walls[wId]
         if (w.startNodeId === id || w.endNodeId === id) {
           delete state.floorPlan.walls[wId]
         }
       })
+      state.isDirty = true
     }),
 
     snapToExistingNode: (pos, radius, excludeId) => {
@@ -120,6 +130,7 @@ export const useFloorPlanStore = create<FloorPlanStore>()(
           materialId: 'wall-white',
           openings: [],
         }
+        state.isDirty = true
       })
       return id
     },
@@ -127,16 +138,19 @@ export const useFloorPlanStore = create<FloorPlanStore>()(
     updateWall: (id, patch) => set(state => {
       if (state.floorPlan.walls[id]) {
         Object.assign(state.floorPlan.walls[id], patch)
+        state.isDirty = true
       }
     }),
 
     deleteWall: (id) => set(state => {
       delete state.floorPlan.walls[id]
+      state.isDirty = true
     }),
 
     addOpening: (wallId, opening) => set(state => {
       if (state.floorPlan.walls[wallId]) {
         state.floorPlan.walls[wallId].openings.push({ ...opening, id: nanoid() })
+        state.isDirty = true
       }
     }),
 
@@ -145,16 +159,19 @@ export const useFloorPlanStore = create<FloorPlanStore>()(
         state.floorPlan.walls[wallId].openings = state.floorPlan.walls[wallId].openings.filter(
           o => o.id !== openingId
         )
+        state.isDirty = true
       }
     }),
 
     setRooms: (rooms) => set(state => {
       state.floorPlan.rooms = Object.fromEntries(rooms.map(r => [r.id, r]))
+      state.isDirty = true
     }),
 
     updateRoom: (id, patch) => set(state => {
       if (state.floorPlan.rooms[id]) {
         Object.assign(state.floorPlan.rooms[id], patch)
+        state.isDirty = true
       }
     }),
 
@@ -170,6 +187,7 @@ export const useFloorPlanStore = create<FloorPlanStore>()(
       if (state.historyIndex > 0) {
         state.historyIndex--
         state.floorPlan = JSON.parse(JSON.stringify(state.history[state.historyIndex]))
+        state.isDirty = true
       }
     }),
 
@@ -177,13 +195,19 @@ export const useFloorPlanStore = create<FloorPlanStore>()(
       if (state.historyIndex < state.history.length - 1) {
         state.historyIndex++
         state.floorPlan = JSON.parse(JSON.stringify(state.history[state.historyIndex]))
+        state.isDirty = true
       }
     }),
+
+    markClean: () => set(state => { state.isDirty = false }),
+    setCurrentSaveId: (id) => set(state => { state.currentSaveId = id }),
 
     reset: () => set(state => {
       state.floorPlan = { ...DEFAULT_FLOOR_PLAN, id: nanoid() }
       state.history = []
       state.historyIndex = -1
+      state.isDirty = false
+      state.currentSaveId = null
     }),
   }))
 )
