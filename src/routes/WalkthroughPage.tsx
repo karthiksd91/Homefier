@@ -12,6 +12,7 @@ import WalkthroughOverlay from '@/components/walkthrough/WalkthroughOverlay'
 import { usePointerLock } from '@/hooks/usePointerLock'
 import { useFurnitureStore } from '@/store/useFurnitureStore'
 import { useFloorPlanStore } from '@/store/useFloorPlanStore'
+import { computeSceneCentroid } from '@/lib/geometry/wallExtruder'
 
 export default function WalkthroughPage() {
   const navigate = useNavigate()
@@ -22,16 +23,17 @@ export default function WalkthroughPage() {
 
   const hasRooms = Object.keys(floorPlan.rooms).length > 0
 
-  // Compute start position: center of first room
+  // Compute start position: center of first room, in the same centered world space as the 3D model
   const startPosition = useMemo((): [number, number, number] => {
     const rooms = Object.values(floorPlan.rooms)
     if (rooms.length === 0) return [0, 0, 5]
     const room = rooms[0]
     const scale = floorPlan.scale || 100
+    const { cx: centroidX, cz: centroidZ } = computeSceneCentroid(floorPlan)
     const xs = room.nodeIds.map(id => floorPlan.nodes[id]?.position.x ?? 0)
     const ys = room.nodeIds.map(id => floorPlan.nodes[id]?.position.y ?? 0)
-    const cx = xs.reduce((a, b) => a + b, 0) / xs.length / scale
-    const cz = -(ys.reduce((a, b) => a + b, 0) / ys.length) / scale
+    const cx = xs.reduce((a, b) => a + b, 0) / xs.length / scale - centroidX
+    const cz = -(ys.reduce((a, b) => a + b, 0) / ys.length) / scale - centroidZ
     return [cx, 0, cz]
   }, [floorPlan])
 

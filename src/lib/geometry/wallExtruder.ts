@@ -42,22 +42,26 @@ function wallLength(wall: WallSegment, floorPlan: FloorPlan): number {
   return Math.sqrt((ex - sx) ** 2 + (ez - sz) ** 2)
 }
 
+/** Returns the centroid used to center the 3D model at origin.
+ *  Collision boxes and camera positions must subtract this same offset. */
+export function computeSceneCentroid(floorPlan: FloorPlan): { cx: number; cz: number } {
+  const scale = floorPlan.scale || 100
+  const allNodes = Object.values(floorPlan.nodes)
+  if (allNodes.length === 0) return { cx: 0, cz: 0 }
+  let cx = 0, cz = 0
+  for (const node of allNodes) {
+    const [wx, wz] = canvasToWorld(node.position.x, node.position.y, scale)
+    cx += wx
+    cz += wz
+  }
+  return { cx: cx / allNodes.length, cz: cz / allNodes.length }
+}
+
 export function extrudeFloorPlan(floorPlan: FloorPlan): ExtrudedScene {
   const scale = floorPlan.scale || 100
 
   // Compute centroid of all nodes to center the model at origin
-  const allNodes = Object.values(floorPlan.nodes)
-  let centroidX = 0
-  let centroidZ = 0
-  if (allNodes.length > 0) {
-    for (const node of allNodes) {
-      const [wx, wz] = canvasToWorld(node.position.x, node.position.y, scale)
-      centroidX += wx
-      centroidZ += wz
-    }
-    centroidX /= allNodes.length
-    centroidZ /= allNodes.length
-  }
+  const { cx: centroidX, cz: centroidZ } = computeSceneCentroid(floorPlan)
 
   const walls: WallMeshData[] = Object.values(floorPlan.walls).map(wall => {
     const start = getNode(floorPlan, wall.startNodeId)

@@ -1,4 +1,5 @@
 import type { FloorPlan } from '@/types'
+import { computeSceneCentroid } from './wallExtruder'
 
 interface AABB {
   minX: number
@@ -9,13 +10,15 @@ interface AABB {
 
 export function buildWallAABBs(floorPlan: FloorPlan): AABB[] {
   const scale = floorPlan.scale || 100
+  const { cx: centroidX, cz: centroidZ } = computeSceneCentroid(floorPlan)
+
   return Object.values(floorPlan.walls).map(wall => {
     const s = floorPlan.nodes[wall.startNodeId].position
     const e = floorPlan.nodes[wall.endNodeId].position
-    const sx = s.x / scale
-    const sz = -s.y / scale
-    const ex = e.x / scale
-    const ez = -e.y / scale
+    const sx = s.x / scale - centroidX
+    const sz = -s.y / scale - centroidZ
+    const ex = e.x / scale - centroidX
+    const ez = -e.y / scale - centroidZ
     const t = wall.thickness / 2
 
     return {
