@@ -2,6 +2,7 @@ import { useRef } from 'react'
 import type { Mesh } from 'three'
 import { FURNITURE_BY_ID } from '@/lib/catalog/furnitureCatalog'
 import type { PlacedFurniture } from '@/types'
+import FurnitureMesh from './FurnitureMesh'
 
 interface Props {
   furniture: PlacedFurniture
@@ -17,54 +18,60 @@ export default function FurnitureItem3D({ furniture, selected, ghost, onClick }:
 
   const { width, depth, height } = catalogItem.dimensions
   const scale = furniture.scale
-  const halfH = (height * scale) / 2
 
   return (
     <group
       position={furniture.position}
       rotation={[0, furniture.rotation, 0]}
+      scale={[scale, scale, scale]}
     >
-      <mesh
-        ref={ref}
-        // Lift mesh so bottom sits on the floor (y=0)
-        position={[0, halfH, 0]}
-        castShadow={!ghost}
-        receiveShadow={!ghost}
-        // Ghost is purely visual — disable raycasting so clicks reach the floor plane
-        raycast={ghost ? () => {} : undefined}
-        onClick={ghost ? undefined : e => { e.stopPropagation(); onClick?.() }}
-        scale={[scale, scale, scale]}
-      >
-        <boxGeometry args={[width, height, depth]} />
-        <meshStandardMaterial
-          color={selected ? '#0ea5e9' : ghost ? '#22c55e' : catalogItem.color}
-          roughness={0.7}
-          metalness={0.1}
-          transparent={ghost}
-          opacity={ghost ? 0.45 : 1}
-          emissive={selected ? '#0369a1' : '#000'}
-          emissiveIntensity={selected ? 0.3 : 0}
-          wireframe={ghost}
-          depthWrite={!ghost}
-        />
-      </mesh>
+      {/* Ghost: simple wireframe bounding box overlay, no click interaction */}
+      {ghost ? (
+        <mesh position={[0, height / 2, 0]} raycast={() => {}}>
+          <boxGeometry args={[width, height, depth]} />
+          <meshStandardMaterial
+            color="#22c55e"
+            wireframe
+            transparent
+            opacity={0.5}
+            depthWrite={false}
+          />
+        </mesh>
+      ) : (
+        /* Invisible hitbox for click detection on placed furniture */
+        <mesh
+          ref={ref}
+          position={[0, height / 2, 0]}
+          onClick={e => { e.stopPropagation(); onClick?.() }}
+        >
+          <boxGeometry args={[width, height, depth]} />
+          <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+        </mesh>
+      )}
 
-      {/* Label above furniture */}
+      {/* Realistic furniture shape — only rendered for placed (non-ghost) items */}
+      {!ghost && <FurnitureMesh item={catalogItem} selected={selected} />}
+
+      {/* Selection ring at floor level */}
       {selected && (
-        <group position={[0, height * scale + 0.2, 0]}>
+        <mesh position={[0, 0.01, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+          <ringGeometry args={[
+            Math.max(width, depth) * 0.6,
+            Math.max(width, depth) * 0.65,
+            32,
+          ]} />
+          <meshBasicMaterial color="#0ea5e9" transparent opacity={0.8} />
+        </mesh>
+      )}
+
+      {/* Label plane above selected furniture */}
+      {selected && (
+        <group position={[0, height + 0.2, 0]}>
           <mesh>
             <planeGeometry args={[0.8, 0.25]} />
             <meshBasicMaterial color="#0f172a" transparent opacity={0.85} />
           </mesh>
         </group>
-      )}
-
-      {/* Selection ring */}
-      {selected && (
-        <mesh position={[0, 0.01, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-          <ringGeometry args={[Math.max(width, depth) * scale * 0.6, Math.max(width, depth) * scale * 0.65, 32]} />
-          <meshBasicMaterial color="#0ea5e9" transparent opacity={0.8} />
-        </mesh>
       )}
     </group>
   )
